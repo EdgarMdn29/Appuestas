@@ -177,7 +177,7 @@ function buildMockResponse(matches: Match[] = [], league?: string, date?: string
                     recommendedMarketPriority: 2,
                     favoriteTrap: false,
                     lowData: true,
-                    profile: "conservador",
+                    profile: "conservador" as const,
                 },
             ]
             : []),

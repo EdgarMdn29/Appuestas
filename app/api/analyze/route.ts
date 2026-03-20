@@ -233,7 +233,7 @@ function normalizeAnalysisResult(raw: any): AnalysisResult {
     const playerPropsRaw = Array.isArray(raw?.playerProps) ? raw.playerProps : [];
 
     const bestBets = bestBetsRaw
-        .map((bet, index) => normalizeBestBet(bet, index))
+        .map((bet: any, index: number) => normalizeBestBet(bet, index))
         .sort((a, b) => {
             if (a.recommendedMarketPriority !== b.recommendedMarketPriority) {
                 return a.recommendedMarketPriority - b.recommendedMarketPriority;

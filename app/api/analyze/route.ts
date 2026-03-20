@@ -77,8 +77,39 @@ type CachedEntry = {
     result: AnalysisResult;
 };
 
+type BestBetInput = Partial<BestBet>;
+type ParlayInput = Partial<Parlay> & { legs?: unknown };
+type PlayerPropInput = Partial<PlayerProp>;
+
+type AnalysisModelOutput = {
+    summary?: unknown;
+    dataReliability?: unknown;
+    bestBets?: unknown;
+    parlays?: unknown;
+    playerProps?: unknown;
+};
+
+type OpenRouterSuccessResponse = {
+    choices?: Array<{
+        message?: {
+            content?: string;
+        };
+    }>;
+    error?: {
+        message?: string;
+    };
+};
+
 const ANALYSIS_CACHE = new Map<string, CachedEntry>();
 const ONE_HOUR_MS = 60 * 60 * 1000;
+
+function isObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
+}
+
+function asArray<T>(value: unknown): T[] {
+    return Array.isArray(value) ? (value as T[]) : [];
+}
 
 function getMatchLabel(match: Match) {
     return `${match.homeTeam.name} vs ${match.awayTeam.name}`;
@@ -113,7 +144,7 @@ function makeCacheKey(body: AnalyzeRequestBody, useMock: boolean) {
         league: body.league ?? "",
         date: body.date ?? "",
         useMock,
-        matches: (body.matches ?? []).map((m) => ({
+        matches: (body.matches ?? []).map((m: Match) => ({
             id: m.id,
             date: m.date,
             startDateTimeUtc: m.startDateTimeUtc,
@@ -177,8 +208,8 @@ function buildMockResponse(matches: Match[] = [], league?: string, date?: string
                     recommendedMarketPriority: 2,
                     favoriteTrap: false,
                     lowData: true,
-                    profile: "conservador" as const,
-                },
+                    profile: "conservador",
+                } satisfies BestBet,
             ]
             : []),
     ];
@@ -190,90 +221,120 @@ function buildMockResponse(matches: Match[] = [], league?: string, date?: string
         parlays: [],
         playerProps: [],
         bestPickOfTheDay: bestBets[0] ?? null,
-        recommendedExposureUnits: bestBets.reduce((acc, bet) => acc + bet.units, 0),
+        recommendedExposureUnits: bestBets.reduce(
+            (acc: number, bet: BestBet) => acc + bet.units,
+            0
+        ),
     };
 }
 
-function normalizeBestBet(raw: any, index: number): BestBet {
-    const rating = clampNumber(raw?.rating, 1, 10, 5.5);
-    const dataReliability = clampNumber(raw?.dataReliability, 1, 10, 4.5);
+function normalizeBestBet(raw: unknown, index: number): BestBet {
+    const input: BestBetInput = isObject(raw) ? (raw as BestBetInput) : {};
+
+    const rating = clampNumber(input.rating, 1, 10, 5.5);
+    const dataReliability = clampNumber(input.dataReliability, 1, 10, 4.5);
 
     return {
-        market: truncateText(raw?.market, 120, "Mercado no especificado"),
-        pick: truncateText(raw?.pick, 200, "Pick no especificado"),
+        market: truncateText(input.market, 120, "Mercado no especificado"),
+        pick: truncateText(input.pick, 200, "Pick no especificado"),
         rating,
         units: getUnitsFromRating(rating),
         justification: truncateText(
-            raw?.justification,
+            input.justification,
             500,
             "Justificación no especificada."
         ),
-        risk: truncateText(raw?.risk, 500, "Riesgo no especificado."),
+        risk: truncateText(input.risk, 500, "Riesgo no especificado."),
         dataReliability,
         confidenceLabel: truncateText(
-            raw?.confidenceLabel,
+            input.confidenceLabel,
             30,
             getConfidenceLabel(rating)
         ),
         recommendedMarketPriority: clampNumber(
-            raw?.recommendedMarketPriority,
+            input.recommendedMarketPriority,
             1,
             99,
             index + 1
         ),
-        favoriteTrap: Boolean(raw?.favoriteTrap),
-        lowData: Boolean(raw?.lowData ?? dataReliability < 5),
-        profile: raw?.profile === "agresivo" ? "agresivo" : "conservador",
+        favoriteTrap: Boolean(input.favoriteTrap),
+        lowData: Boolean(input.lowData ?? dataReliability < 5),
+        profile: input.profile === "agresivo" ? "agresivo" : "conservador",
     };
 }
 
-function normalizeAnalysisResult(raw: any): AnalysisResult {
-    const bestBetsRaw = Array.isArray(raw?.bestBets) ? raw.bestBets : [];
-    const parlaysRaw = Array.isArray(raw?.parlays) ? raw.parlays : [];
-    const playerPropsRaw = Array.isArray(raw?.playerProps) ? raw.playerProps : [];
+function normalizeAnalysisResult(raw: unknown): AnalysisResult {
+    const input: AnalysisModelOutput = isObject(raw) ? (raw as AnalysisModelOutput) : {};
 
-    const bestBets = bestBetsRaw
-        .map((bet: any, index: number) => normalizeBestBet(bet, index))
-        .sort((a, b) => {
+    const bestBetsRaw = asArray<unknown>(input.bestBets);
+    const parlaysRaw = asArray<unknown>(input.parlays);
+    const playerPropsRaw = asArray<unknown>(input.playerProps);
+
+    const bestBets: BestBet[] = bestBetsRaw
+        .map((bet: unknown, index: number) => normalizeBestBet(bet, index))
+        .sort((a: BestBet, b: BestBet) => {
             if (a.recommendedMarketPriority !== b.recommendedMarketPriority) {
                 return a.recommendedMarketPriority - b.recommendedMarketPriority;
             }
             return b.rating - a.rating;
         });
 
-    const parlays: Parlay[] = parlaysRaw.slice(0, 2).map((parlay: any) => {
-        const rating = clampNumber(parlay?.rating, 1, 10, 5.5);
+    const parlays: Parlay[] = parlaysRaw.slice(0, 2).map((parlayRaw: unknown) => {
+        const inputParlay: ParlayInput = isObject(parlayRaw)
+            ? (parlayRaw as ParlayInput)
+            : {};
+        const rating = clampNumber(inputParlay.rating, 1, 10, 5.5);
+
         return {
-            name: truncateText(parlay?.name, 120, "Parlay"),
-            legs: Array.isArray(parlay?.legs)
-                ? parlay.legs.map((leg: unknown) => truncateText(leg, 120, "")).filter(Boolean)
+            name: truncateText(inputParlay.name, 120, "Parlay"),
+            legs: Array.isArray(inputParlay.legs)
+                ? inputParlay.legs
+                    .map((leg: unknown) => truncateText(leg, 120, ""))
+                    .filter((leg: string) => Boolean(leg))
                 : [],
             rating,
             units: Math.min(getUnitsFromRating(rating), 2),
-            justification: truncateText(parlay?.justification, 500, "Justificación no especificada."),
-            risk: truncateText(parlay?.risk, 500, "Riesgo no especificado."),
+            justification: truncateText(
+                inputParlay.justification,
+                500,
+                "Justificación no especificada."
+            ),
+            risk: truncateText(inputParlay.risk, 500, "Riesgo no especificado."),
         };
     });
 
-    const playerProps: PlayerProp[] = playerPropsRaw.slice(0, 2).map((prop: any) => {
-        const rating = clampNumber(prop?.rating, 1, 10, 4.5);
-        return {
-            player: truncateText(prop?.player, 120, "Jugador no especificado"),
-            market: truncateText(prop?.market, 120, "Mercado no especificado"),
-            pick: truncateText(prop?.pick, 200, "Pick no especificado"),
-            rating,
-            units: getUnitsFromRating(rating),
-            justification: truncateText(prop?.justification, 500, "Justificación no especificada."),
-            risk: truncateText(prop?.risk, 500, "Riesgo no especificado."),
-        };
-    });
+    const playerProps: PlayerProp[] = playerPropsRaw
+        .slice(0, 2)
+        .map((propRaw: unknown) => {
+            const inputProp: PlayerPropInput = isObject(propRaw)
+                ? (propRaw as PlayerPropInput)
+                : {};
+            const rating = clampNumber(inputProp.rating, 1, 10, 4.5);
+
+            return {
+                player: truncateText(inputProp.player, 120, "Jugador no especificado"),
+                market: truncateText(inputProp.market, 120, "Mercado no especificado"),
+                pick: truncateText(inputProp.pick, 200, "Pick no especificado"),
+                rating,
+                units: getUnitsFromRating(rating),
+                justification: truncateText(
+                    inputProp.justification,
+                    500,
+                    "Justificación no especificada."
+                ),
+                risk: truncateText(inputProp.risk, 500, "Riesgo no especificado."),
+            };
+        });
 
     const bestPickOfTheDay = bestBets[0] ?? null;
-    const recommendedExposureUnits = bestBets.reduce((acc, bet) => acc + bet.units, 0);
+    const recommendedExposureUnits = bestBets.reduce(
+        (acc: number, bet: BestBet) => acc + bet.units,
+        0
+    );
 
     return {
-        summary: truncateText(raw?.summary, 600, "Análisis generado con datos limitados."),
-        dataReliability: clampNumber(raw?.dataReliability, 1, 10, 4.5),
+        summary: truncateText(input.summary, 600, "Análisis generado con datos limitados."),
+        dataReliability: clampNumber(input.dataReliability, 1, 10, 4.5),
         bestBets,
         parlays,
         playerProps,
@@ -426,43 +487,44 @@ TEXT RULES
 `.trim();
 
         try {
-            const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${apiKey}`,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    model: "openai/gpt-4o-mini",
-                    messages: [
-                        {
-                            role: "system",
-                            content: systemPrompt,
-                        },
-                        {
-                            role: "user",
-                            content: JSON.stringify({
-                                league: body.league,
-                                date: body.date,
-                                matches,
-                            }),
-                        },
-                    ],
-                }),
-            });
+            const response = await fetch(
+                "https://openrouter.ai/api/v1/chat/completions",
+                {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        model: "openai/gpt-4o-mini",
+                        messages: [
+                            {
+                                role: "system",
+                                content: systemPrompt,
+                            },
+                            {
+                                role: "user",
+                                content: JSON.stringify({
+                                    league: body.league,
+                                    date: body.date,
+                                    matches,
+                                }),
+                            },
+                        ],
+                    }),
+                }
+            );
 
-            const data = await response.json();
+            const data: OpenRouterSuccessResponse = await response.json();
 
             if (!response.ok) {
                 throw new Error(
-                    data?.error?.message ||
-                    data?.error ||
-                    "OpenRouter request failed"
+                    data.error?.message || "OpenRouter request failed"
                 );
             }
 
             const content = data?.choices?.[0]?.message?.content ?? "";
-            const parsed = JSON.parse(content);
+            const parsed: unknown = JSON.parse(content);
             const result = normalizeAnalysisResult(parsed);
 
             ANALYSIS_CACHE.set(cacheKey, {
@@ -477,7 +539,7 @@ TEXT RULES
                 cached: false,
                 cacheTtlMs: ONE_HOUR_MS,
             });
-        } catch (modelError) {
+        } catch (modelError: unknown) {
             const fallback = buildMockResponse(matches, body.league, body.date);
 
             ANALYSIS_CACHE.set(cacheKey, {
@@ -492,10 +554,12 @@ TEXT RULES
                 cached: false,
                 cacheTtlMs: ONE_HOUR_MS,
                 modelError:
-                    modelError instanceof Error ? modelError.message : "Unknown model error",
+                    modelError instanceof Error
+                        ? modelError.message
+                        : "Unknown model error",
             });
         }
-    } catch (error) {
+    } catch (error: unknown) {
         return NextResponse.json(
             {
                 error: "Unexpected server error",
